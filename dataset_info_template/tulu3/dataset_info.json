@@ -1,0 +1,15 @@
+{
+  "coreset": {
+    "file_name": "coreset.jsonl",  
+    "columns": {
+      "messages": "conversations"
+    },
+    "formatting": "sharegpt",
+    "tags": {
+      "role_tag": "from",
+      "content_tag": "value",
+      "user_tag": "human",
+      "assistant_tag": "gpt"
+    }
+  }
+}
