@@ -13,4 +13,5 @@ score/
 sft_model/
 tmp/
 recode.json
+analyze/
 
