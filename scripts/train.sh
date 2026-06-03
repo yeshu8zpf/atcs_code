@@ -17,7 +17,7 @@ llamafactory-cli train \
   --gradient_accumulation_steps 8 \
   --lr_scheduler_type cosine \
   --warmup_steps 60 \
-  --learning_rate 5e-6 \
-  --num_train_epochs 5 \
-  --fp16 \
+  --learning_rate 5e-5 \
+  --num_train_epochs 3 \
+  --bf16 \
   --save_strategy epoch

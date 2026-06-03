@@ -26,6 +26,8 @@ parser.add_argument('--x_trunc_side', type=str, default="left", choices=["left",
 parser.add_argument('--freq_path', type=str, default="freqs/c4_Llama_freq.pt")
 parser.add_argument('--uncond_ctx_text', type=str, default="gpt: ",
                     help='Fixed context used for the no-instruction case to avoid undefined probability for the first y token')
+parser.add_argument('--dc_pdd_cap', type=float, default=float("inf"),
+                    help='Upper bound a for DC-PDD token scores')
 parser.add_argument('--return_x_text_used', action='store_true',
                     help="Whether to save the decoded x_text_used in the output (audit only; adds small overhead)")
 
@@ -42,6 +44,7 @@ X_TRUNC_SIDE = args.x_trunc_side
 
 FREQ_PATH = args.freq_path
 UNCOND_CTX_TEXT = args.uncond_ctx_text
+DCPDD_CAP = args.dc_pdd_cap
 RETURN_X_TEXT_USED = args.return_x_text_used
 
 
@@ -110,16 +113,22 @@ def compute_token_unfamiliarity_score(
     logits_y: torch.Tensor,   # [T, V]
     y_ids: List[int],
     log_freq: torch.Tensor,   # [V]
+    cap: float = DCPDD_CAP,
 ) -> float:
     if len(y_ids) == 0:
         return 0.0
     probs = torch.softmax(logits_y, dim=-1)  # [T, V]
     scores = []
+    seen = set()
     V = log_freq.size(0)
     for t, tid in enumerate(y_ids):
+        if tid in seen:
+            continue
+        seen.add(tid)
         if tid >= V:
             raise ValueError("4")
-        scores.append(probs[t, tid].item() * log_freq[tid].item())
+        alpha = -probs[t, tid].item() * log_freq[tid].item()
+        scores.append(min(alpha, cap))
     return sum(scores) / len(scores) if scores else 0.0
 
 
@@ -156,14 +165,20 @@ def get_logits_for_target_ids(
     """
     device = model.device
 
-    # Unconditional context
+    # Unconditional context: prefer a true sequence-start token.
     used_uncond = False
-    if (ctx_text is None or ctx_text == "") and uncond_ctx_text:
-        ctx_text = uncond_ctx_text
+    if ctx_text is None or ctx_text == "":
         used_uncond = True
-
-    # x -> ids + truncate (no decode, no second encode)
-    x_ids, x_orig_len = truncate_x_ids(tokenizer, ctx_text, x_max_tokens, x_trunc_side)
+        if tokenizer.bos_token_id is not None:
+            x_ids = [tokenizer.bos_token_id]
+        elif tokenizer.eos_token_id is not None:
+            x_ids = [tokenizer.eos_token_id]
+        else:
+            x_ids = truncate_y_ids(tokenizer, uncond_ctx_text, x_max_tokens)
+        x_orig_len = len(x_ids)
+    else:
+        # x -> ids + truncate (no decode, no second encode)
+        x_ids, x_orig_len = truncate_x_ids(tokenizer, ctx_text, x_max_tokens, x_trunc_side)
     if len(x_ids) == 0:
         return None, [], {}
 
@@ -336,7 +351,7 @@ def main():
 
                 "nll": nll_with_x,
                 "nll_no_x": nll_no_x,
-                "ufs": res_with_x["ufs"],
+                "ufs": res_no_x["ufs"],
 
                 # token-level (with x)
                 "tgt_ids": res_with_x["tgt_ids"],

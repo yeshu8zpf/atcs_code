@@ -1,17 +1,85 @@
+# OS / editor
+.DS_Store
+Thumbs.db
 .cache/
 .vscode/
-coreset/
-coarse_results/
-eval_results/
-figs/
-icl_inference_output/
-merge_model/
-mucs/
-plot/
-probs/
-score/
-sft_model/
-tmp/
-recode.json
-analyze/
+.idea/
 
+# Local agent / tool state
+.agents/
+.codex/
+
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Secrets / local machine config
+*.ovpn
+*.pem
+*.key
+*.crt
+*.env
+*.env.*
+
+# Large local assets
+data
+data/
+data_new
+data_new/
+models
+models/
+freqs/C4/
+freqs/.hf_datasets_cache/
+freqs/*.pt
+freqs/*.bin
+freqs/*.safetensors
+
+# Training / selection / eval outputs
+coreset
+coreset/
+coarse_results
+coarse_results/
+score
+score/
+sft_model
+sft_model/
+merge_model
+merge_model/
+eval_results
+eval_results/
+icl_inference_output
+icl_inference_output/
+mucs
+mucs/
+plot
+plot/
+probs
+probs/
+figs
+figs/
+figures
+figures/
+tmp
+tmp/
+
+# Analysis outputs
+analysis/
+analyze/results/
+recode.json
+topk_sentence_overlap_details.jsonl
+topk_sentence_overlap_results.json
+
+# Notebook / misc temp files
+*.log
+*.tmp
+*.swp
+*.swo

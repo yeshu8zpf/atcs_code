@@ -12,7 +12,7 @@ parser.add_argument('--input_file', type=str, default="tulu-3-sft-mixture")
 parser.add_argument('--output_file', type=str, default='tulu3.jsonl')
 args = parser.parse_args()
 
-input_dir = f"{args.dir}/{args.input_fiel}"   
+input_dir = f"{args.dir}/{args.input_file}"
 output_file = f"{args.dir}/{args.output_file}"
 
 def normalize(value):
@@ -32,4 +32,3 @@ with open(output_file, "w", encoding="utf-8") as fout:
                 fout.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 print("completed, output file:", output_file)
-

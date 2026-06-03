@@ -14,6 +14,7 @@ parser.add_argument('--output_file', type=str, default='score/qwen/tulu3/ifd_all
 parser.add_argument('--model_name', type=str, default="Qwen/Qwen2.5-7B")
 parser.add_argument('--x_max_tokens', type=int, default=1000)
 parser.add_argument('--y_max_tokens', type=int, default=70)
+parser.add_argument('--dc_pdd_cap', type=float, default=float("inf"))
 args = parser.parse_args()
 
 # ================ Config ================
@@ -23,33 +24,52 @@ MODEL_NAME = args.model_name
 # Truncation lengths for x / y tokens
 X_MAX_TOKENS = args.x_max_tokens   # x: keep the last X_MAX_TOKENS tokens
 Y_MAX_TOKENS = args.y_max_tokens   # y: keep only the first Y_MAX_TOKENS tokens
+DCPDD_CAP = args.dc_pdd_cap
 
 # ====== UFS freq ======
-FREQ_PATH = "freqs/c4_Qwen_freq.pt"
+if 'qwen' in args.model_name.lower():
+    FREQ_PATH = "freqs/c4_Qwen_freq.pt" 
+elif  'llama' in args.model_name.lower():
+    FREQ_PATH = "freqs/c4_Llama_freq.pt"
+elif  'gpt' in args.model_name.lower():
+    FREQ_PATH = "freqs/c4_gpt2_freq.pt"
+else:
+    raise ValueError('model not predefined')
 
 
 # ================ Utilities ================
+
+def maybe_truncate_ids(ids: List[int], max_tokens: int) -> List[int]:
+    if max_tokens is None or max_tokens < 0:
+        return ids
+    return ids[:max_tokens]
 
 def compute_token_unfamiliarity_score(
     logits_y: torch.Tensor,   # [T, V]
     y_ids: List[int],
     log_freq: torch.Tensor,   # [V]
+    cap: float = DCPDD_CAP,
 ) -> float:
     """
-    UFS = avg_t [ P_theta(y_t) * log_freq(y_t) ]
+    DC-PDD = avg_{t in FOS} min(-P_theta(y_t) * log_freq(y_t), a)
     """
     if len(y_ids) == 0:
         return 0.0
 
     probs = torch.softmax(logits_y, dim=-1)  # [T, V]
     scores = []
+    seen = set()
 
     V = log_freq.size(0)
     for t, tid in enumerate(y_ids):
+        if tid in seen:
+            continue
+        seen.add(tid)
         if tid >= V:
             continue
         p = probs[t, tid].item()
-        scores.append(p * log_freq[tid].item())
+        alpha = -p * log_freq[tid].item()
+        scores.append(min(alpha, cap))
 
     return sum(scores) / len(scores) if scores else 0.0
 
@@ -61,7 +81,7 @@ def get_logits_for_target(
     tgt_text: str,
     x_max_tokens: int = X_MAX_TOKENS,
     y_max_tokens: int = Y_MAX_TOKENS,
-    uncond_ctx_text: str = "gpt: ",   # Use this as x for the unconditional case
+    uncond_ctx_text: str = "gpt: ",   # Fallback only if BOS/EOS is unavailable
 ):
     """
     Return aligned logits for computing p(y|x).
@@ -69,9 +89,8 @@ def get_logits_for_target(
     Rules:
       - x (ctx_text): keep at most the last x_max_tokens tokens
       - y (tgt_text): keep only the first y_max_tokens tokens
-      - If ctx_text is empty, use uncond_ctx_text as an "unconditional context" to avoid the issue
-        that the probability of the first y token is undefined with an empty context
-        (i.e., compute p(y | uncond_ctx_text)).
+      - If ctx_text is empty, prepend a single BOS/EOS token as the sequence-start marker.
+        Fall back to uncond_ctx_text only if the tokenizer has no BOS/EOS token.
 
     Alignment for an autoregressive LM:
       - logits[pos] predicts input_ids[pos+1]
@@ -81,22 +100,26 @@ def get_logits_for_target(
     """
     device = model.device
 
-    # 0) Unconditional handling: replace empty ctx with a fixed prefix
-    if ctx_text == "" and uncond_ctx_text:
-        ctx_text = uncond_ctx_text
-
-    # 1) tokenize x
-    ctx_ids = tokenizer.encode(ctx_text, add_special_tokens=False)
+    # 0) Unconditional handling: prefer a true sequence-start token.
+    if ctx_text == "":
+        if tokenizer.bos_token_id is not None:
+            ctx_ids = [tokenizer.bos_token_id]
+        elif tokenizer.eos_token_id is not None:
+            ctx_ids = [tokenizer.eos_token_id]
+        else:
+            ctx_ids = tokenizer.encode(uncond_ctx_text, add_special_tokens=False)
+    else:
+        ctx_ids = tokenizer.encode(ctx_text, add_special_tokens=False)
     if len(ctx_ids) == 0:
-        # If even uncond_ctx_text becomes empty after tokenization, we cannot proceed
+        # If the tokenizer has no BOS/EOS and the fallback text is empty, we cannot proceed
         return None, []
 
     if x_max_tokens is not None and x_max_tokens >= 0 and len(ctx_ids) > x_max_tokens:
         print(f"[warn] length of x_text exceeds max_token! {len(ctx_ids)} -> keep last {x_max_tokens}")
-        ctx_ids = ctx_ids[:x_max_tokens]
+        ctx_ids = ctx_ids[-x_max_tokens:]
 
     # 2) tokenize y
-    tgt_ids = tokenizer.encode(tgt_text, add_special_tokens=False)[:y_max_tokens]
+    tgt_ids = maybe_truncate_ids(tokenizer.encode(tgt_text, add_special_tokens=False), y_max_tokens)
     T = len(tgt_ids)
     if T == 0:
         return None, []
@@ -176,7 +199,7 @@ def compute_nll_and_label_logits(
     nll = -ll
 
     ufs = None
-    if log_freq is not None and len(x_text) > 0:
+    if log_freq is not None:
         ufs = compute_token_unfamiliarity_score(logits, tgt_ids, log_freq)
 
     return {
@@ -274,6 +297,9 @@ def main():
                 "tgt_ids": res_with_x["tgt_ids"],
                 "logprob": res_with_x["logprob"],
                 "label_logits": res_with_x["label_logits"],
+
+                "x_text": x_text,
+                "y_text": y_text
             }
 
             fout.write(json.dumps(out_obj, ensure_ascii=False) + "\n")

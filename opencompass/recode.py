@@ -15,8 +15,16 @@ with open(csv_file, "r", encoding="utf-8") as f:
     for row in reader:
         if not row:
             continue
-        score = float(row[-1]) 
+        try:
+            score = float(row[-1])
+        except ValueError:
+            print(f"[WARNING] Skip non-numeric score row: {row}")
+            continue
         scores.append(score)
+
+if not scores:
+    print(f"[WARNING] No valid numeric scores found in {csv_file}, skip recoding.")
+    raise SystemExit(0)
 
 avg = sum(scores) / len(scores)
 

@@ -8,6 +8,9 @@ from opencompass.tasks import OpenICLInferTask
 from mmengine.config import read_base
 import os as _os
 MODEL_PATH = _os.environ.get("MERGE_DIR", "merge_model/qwen/tulu3/key/ifd_ifd")
+VLLM_MAX_MODEL_LEN = int(_os.environ.get("VLLM_MAX_MODEL_LEN", "8000"))
+VLLM_GPU_MEMORY_UTILIZATION = float(_os.environ.get("VLLM_GPU_MEMORY_UTILIZATION", "0.80"))
+VLLM_BATCH_SIZE = int(_os.environ.get("VLLM_BATCH_SIZE", "16"))
 
 with read_base():
     from opencompass.configs.datasets.bbh.bbh_gen import bbh_datasets
@@ -21,10 +24,10 @@ models = [
         max_out_len=1024,
         max_seq_len=4096,
         model_kwargs=dict(
-            max_model_len=8000,
-            gpu_memory_utilization=0.80,
+            max_model_len=VLLM_MAX_MODEL_LEN,
+            gpu_memory_utilization=VLLM_GPU_MEMORY_UTILIZATION,
         ),
-        batch_size=16,
+        batch_size=VLLM_BATCH_SIZE,
         generation_kwargs=dict(
             temperature=0.0,
             top_p=1.0,

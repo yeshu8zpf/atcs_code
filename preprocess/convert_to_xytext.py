@@ -1,6 +1,6 @@
 import os
 import json
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 
 from tqdm import tqdm
 from transformers import AutoTokenizer
@@ -11,14 +11,16 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--dir', type=str, default="data")
 parser.add_argument('--input_file', type=str, default="instag_cleaned.jsonl")
 parser.add_argument('--output_file', type=str, default='instag_xytext.jsonl')
+parser.add_argument('--sharegpt_output_file', type=str, default="")
 parser.add_argument('--x_max_token', type=int, default=500)
-parser.add_argument('--y_max_token', type=int, default=50)
+parser.add_argument('--y_max_token', type=int, default=100)
 parser.add_argument('--model_name', type=str, default="models/gpt2")
 args = parser.parse_args()
 # ===== Config =====
 BASE_DIR = args.dir
 RAW_FILE = args.input_file
 OUTPUT_FILE = args.output_file
+SHAREGPT_OUTPUT_FILE = args.sharegpt_output_file
 
 MODEL_NAME = args.model_name
 X_MAX_TOKENS = args.x_max_token   # Token limit for x_text (all turns concatenated)
@@ -47,16 +49,18 @@ def truncate_text_by_tokens(
     return truncated_text.strip()
 
 
-def build_x_text(
+def build_sample(
     conversations: List[dict],
     tokenizer: AutoTokenizer,
     max_tokens: int,
-) -> Tuple[str, bool]:
+) -> Tuple[str, str, List[Dict[str, str]], bool]:
     """
-    Build x_text following these rules:
-    1. Start from last human turn + X_END_GPT_PREFIX as base.
-    2. If under max_tokens, add history turns in order: first turn → second to last turn → third to last turn...
-    3. Return (x_text, is_too_long), where is_too_long=True means last turn exceeded token limit and sample should be discarded.
+    Build a truncated training/scoring sample following these rules:
+    1. Keep a conversation prefix in chronological order.
+    2. Use the last kept human turn + X_END_GPT_PREFIX as x_text.
+    3. Use the last kept gpt turn as y_text.
+    4. Return (x_text, y_text, truncated_conversations, is_too_long), where
+       is_too_long=True means even the first turn prompt exceeded max_tokens.
     """
     # Filter valid turns with human and gpt both present and non-empty content
     valid_turns = []
@@ -76,56 +80,46 @@ def build_x_text(
         })
 
     if not valid_turns:
-        return "", False
+        return "", "", [], False
 
-    last_turn = valid_turns[-1]
-    base_x = f"{HUMAN_PREFIX}{last_turn['human']}{X_END_GPT_PREFIX}"
-    base_ids = tokenizer.encode(base_x, add_special_tokens=False)
-    base_token_len = len(base_ids)
+    prefix_token_len = 0
+    last_kept_idx = -1
 
-    if base_token_len > max_tokens:
-        return "", True  # Too long, discard sample
+    for i, turn in enumerate(valid_turns):
+        prompt_text = f"{HUMAN_PREFIX}{turn['human']}{X_END_GPT_PREFIX}"
+        prompt_len = len(tokenizer.encode(prompt_text, add_special_tokens=False))
 
-    history_turns = valid_turns[:-1]
-    if not history_turns:
-        return base_x, False
-
-    # Reorder history: first turn → reversed remaining turns
-    if len(history_turns) <= 1:
-        add_turns = history_turns
-    else:
-        first_turn = [history_turns[0]]
-        remaining_turns_reversed = history_turns[1:][::-1]
-        add_turns = first_turn + remaining_turns_reversed
-
-    selected_turns = []
-    current_token_len = base_token_len
-
-    for turn in add_turns:
-        turn_text = f"\n{HUMAN_PREFIX}{turn['human']}\n{GPT_PREFIX}{turn['gpt']}"
-        turn_ids = tokenizer.encode(turn_text, add_special_tokens=False)
-        turn_token_len = len(turn_ids)
-
-        if current_token_len + turn_token_len <= max_tokens:
-            selected_turns.append(turn)
-            current_token_len += turn_token_len
+        if prefix_token_len + prompt_len <= max_tokens:
+            last_kept_idx = i
+            full_turn_text = f"{HUMAN_PREFIX}{turn['human']}\n{GPT_PREFIX}{turn['gpt']}\n"
+            prefix_token_len += len(tokenizer.encode(full_turn_text, add_special_tokens=False))
         else:
             break
 
+    if last_kept_idx < 0:
+        return "", "", [], True
+
     final_x = ""
-    for turn in valid_turns:
-        if turn in selected_turns:
-            final_x += f"{HUMAN_PREFIX}{turn['human']}\n{GPT_PREFIX}{turn['gpt']}\n"
+    truncated_conversations = []
+    for turn in valid_turns[:last_kept_idx]:
+        final_x += f"{HUMAN_PREFIX}{turn['human']}\n{GPT_PREFIX}{turn['gpt']}\n"
+        truncated_conversations.extend([
+            {"from": "human", "value": turn["human"]},
+            {"from": "gpt", "value": turn["gpt"]},
+        ])
 
-    final_x += base_x
+    target_turn = valid_turns[last_kept_idx]
+    final_x += f"{HUMAN_PREFIX}{target_turn['human']}{X_END_GPT_PREFIX}"
+    truncated_conversations.append({"from": "human", "value": target_turn["human"]})
 
-    return final_x, False
+    return final_x, target_turn["gpt"], truncated_conversations, False
 
 
 def process_conversations():
     base_dir = BASE_DIR
     data_file = RAW_FILE
     output_file = OUTPUT_FILE
+    sharegpt_output_file = SHAREGPT_OUTPUT_FILE
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     if tokenizer.pad_token is None:
@@ -136,6 +130,7 @@ def process_conversations():
         data = [json.loads(line.strip()) for line in f if line.strip()]
 
     results = []
+    sharegpt_results = []
     too_long_count = 0
     empty_count = 0
 
@@ -155,22 +150,20 @@ def process_conversations():
             empty_count += 1
             continue
 
-        x_text, is_too_long = build_x_text(conversations, tokenizer, X_MAX_TOKENS)
+        x_text, target_gpt_content, truncated_conversations, is_too_long = build_sample(
+            conversations,
+            tokenizer,
+            X_MAX_TOKENS,
+        )
         if is_too_long:
             too_long_count += 1
             continue
 
-        last_gpt_content = ""
-        for turn in reversed(conversations):
-            if turn.get("from") == "gpt" and turn.get("value", "").strip():
-                last_gpt_content = turn["value"].strip()
-                break
-
-        if not last_gpt_content or not x_text:
+        if not target_gpt_content or not x_text or not truncated_conversations:
             empty_count += 1
             continue
 
-        y_text = truncate_text_by_tokens(last_gpt_content, tokenizer, Y_MAX_TOKENS)
+        y_text = truncate_text_by_tokens(target_gpt_content, tokenizer, Y_MAX_TOKENS)
         if not y_text:
             empty_count += 1
             continue
@@ -182,9 +175,26 @@ def process_conversations():
         }
         results.append(new_dict)
 
+        sharegpt_results.append({
+            "id": sample_id,
+            "conversations": truncated_conversations + [
+                {"from": "gpt", "value": y_text},
+            ],
+        })
+
     out_path = os.path.join(base_dir, output_file)
     with open(out_path, "w", encoding="utf-8") as f:
         for d in results:
+            f.write(json.dumps(d, ensure_ascii=False) + "\n")
+
+    if sharegpt_output_file:
+        sharegpt_out_path = os.path.join(base_dir, sharegpt_output_file)
+    else:
+        sharegpt_name, sharegpt_ext = os.path.splitext(output_file)
+        sharegpt_out_path = os.path.join(base_dir, f"{sharegpt_name}_sharegpt{sharegpt_ext or '.jsonl'}")
+
+    with open(sharegpt_out_path, "w", encoding="utf-8") as f:
+        for d in sharegpt_results:
             f.write(json.dumps(d, ensure_ascii=False) + "\n")
 
     print(f"Total original samples: {len(data)}")
@@ -192,6 +202,7 @@ def process_conversations():
     print(f"Discarded due to last turn too long: {too_long_count}")
     print(f"Discarded empty/invalid samples: {empty_count}")
     print(f"Processed data saved to: {out_path}")
+    print(f"Truncated ShareGPT data saved to: {sharegpt_out_path}")
 
 
 if __name__ == "__main__":
